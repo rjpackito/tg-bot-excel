@@ -1,10 +1,27 @@
-import { Telegraf } from "telegraf";
+import { Context, Markup, NarrowedContext, Telegraf } from "telegraf";
 import { message } from "telegraf/filters";
-import { InlineQueryResult } from "telegraf/typings/core/types/typegram";
+import { InlineQueryResult, Message, Update } from "telegraf/typings/core/types/typegram";
 import * as dotenv from "dotenv";
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
+import { start } from "repl";
+import { button } from "telegraf/typings/markup";
 
+enum EState {
+  START = "START",
+  ADD_DATA = "ADD_DATA",
+  ENTER_FIRSTNAME = "ENTER_FIRSTNAME",
+  ENTER_LASTNAME = "ENTER_LASTNAME",
+  WAIT_COMMAND = "WAIT_COMMAND",
+  QUIT = "QUIT",
+}
+interface User {
+  id: number;
+  state: EState;
+  lastname?: string;
+  firstname?: string;
+  username?: string;
+}
 dotenv.config();
 
 const bot = new Telegraf(process.env["BOT_TOKEN"] ?? "");
@@ -19,7 +36,39 @@ const doc = new GoogleSpreadsheet(
   process.env["DOC_ID"] ?? "",
   serviceAccountAuth
 );
+
+const callbackEnterFirstname = Markup.button.callback(
+  "Заполнить имя",
+  "enterFirstname"
+);
+const callbackEnterLastname = Markup.button.callback(
+  "Заполнить фамилию",
+  "enterLastname"
+);
+const callbackSkip = Markup.button.callback("Пропустить заполнение", "skip");
+const callbackSaveInfo = Markup.button.callback(
+  "Сохранить мои данные",
+  "saveMyPersonInfo"
+);
+
+const menuEnterName = Markup.inlineKeyboard(
+  [[callbackEnterFirstname], [callbackEnterLastname], [callbackSkip]]);
+
 await doc.loadInfo(); // loads document properties and worksheets
+
+if (!(await doc.sheetsByTitle["users"])) {
+  await doc.addSheet({
+    title: "users",
+    headerValues: ["id", "state", "lastname", "firstname", "username"],
+  });
+}
+if (!(await doc.sheetsByTitle["runs"])) {
+  await doc.addSheet({
+    title: "runs",
+    headerValues: ["id_run", "id_user", "distance", "time", "running_pace"],
+  });
+}
+
 bot.telegram.setChatMenuButton({ menuButton: { type: "commands" } });
 bot.command("quit", async (ctx) => {
   // Explicit usage
@@ -29,12 +78,48 @@ bot.command("quit", async (ctx) => {
   await ctx.leaveChat();
 });
 
-bot.on(message("text"), async (ctx) => {
-  // Explicit usage
-  await ctx.telegram.sendMessage(
-    ctx.message.chat.id,
-    `Hello ${ctx.state.role}`
+const getCurrentUser = async (ctx :NarrowedContext<Context<Update>, Update.MessageUpdate<Record<"text", {}> & Message.TextMessage>>)=>{
+  const usersSheet = await doc.sheetsByTitle["users"]
+
+  const tgUserInfo = ctx.message.from;
+
+  const userRows = await usersSheet.getRows<User>();
+  return await userRows.find(
+    (row) => Number(row.get("id")) === tgUserInfo.id
   );
+}
+const checkAndSaveUser= async (ctx:NarrowedContext<Context<Update>, Update.MessageUpdate<Record<"text", {}> & Message.TextMessage>>)=>{
+  const usersSheet = await doc.sheetsByTitle["users"]
+  const tgUserInfo = ctx.message.from;
+
+  const user = await getCurrentUser(ctx);
+  
+  if (!user) {
+    usersSheet.addRow({
+      id: ctx.message.from.id,
+      state: EState.START,
+      username: tgUserInfo.username ?? "",
+    });
+  } else {
+    ctx.telegram.sendMessage(
+      ctx.from.id,
+      `Мы уже храним Ваши забеги${
+        user.get("firstname") ? `, ${user.get("firstname")}` : ""
+      }`
+    );
+  }
+}
+
+bot.on(message("text"), async (ctx) => {
+  if (ctx.message.text === "/start") {
+    checkAndSaveUser(ctx);
+    //ctx.telegram.sendMessage(ctx.from.id, "[Евгений](tg://user?id=35438768)",{parse_mode: "Markdown"});
+    ctx.telegram.sendMessage(
+      ctx.from.id,
+      "Заполните ваши данные для отображения в общей статистике",
+      menuEnterName
+    );
+  }
 
   await ctx.telegram.setMyCommands([
     {
@@ -43,9 +128,14 @@ bot.on(message("text"), async (ctx) => {
     },
     { command: "test", description: "Тест" },
   ]);
-  // Using context shortcut
-  //await ctx.reply(`Hello ${ctx.state.role}`);
 });
+
+bot.action("enterFirstname", (ctx) => {
+  ctx.sendMessage("Введите ваше имя");
+
+}
+);
+bot.action("dislike", (ctx) => ctx.editMessageText("okey"));
 
 bot.on("callback_query", async (ctx) => {
   // Explicit usage
